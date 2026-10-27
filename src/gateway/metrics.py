@@ -16,7 +16,7 @@ Metrics live in the default process-wide registry (the usual prometheus_client p
 from prometheus_client import Counter, Histogram, disable_created_metrics
 
 # Drop the extra "*_created" timestamp series per label set: halves series count, unused here.
-disable_created_metrics()
+disable_created_metrics()  # type: ignore[no-untyped-call]  # untyped in prometheus_client
 
 REQUEST_LATENCY = Histogram(
     "gateway_http_request_duration_seconds",

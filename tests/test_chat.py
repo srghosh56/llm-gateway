@@ -80,3 +80,19 @@ async def test_upstream_error_is_502(client: httpx.AsyncClient) -> None:
 async def test_upstream_error_before_stream_is_502(client: httpx.AsyncClient) -> None:
     r = await client.post(CHAT, json=body(model="mock-error", stream=True))
     assert r.status_code == 502
+
+
+async def test_upstream_error_mid_stream_emits_error_event(
+    admin: httpx.AsyncClient, client: httpx.AsyncClient
+) -> None:
+    from tests.conftest import deploy_model
+
+    await deploy_model(admin, "flaky", upstream="mock-error-midstream")
+    r = await client.post(CHAT, json=body(model="flaky", stream=True))
+    assert r.status_code == 200  # headers were already sent when the upstream failed
+    events = parse_sse(r.text)
+    assert events[-1] == "[DONE]"
+    assert json.loads(events[-2])["error"]["code"] == "upstream_error"
+    # the partial output was still charged (1 content chunk -> 1 estimated token)
+    tenants = (await admin.get("/admin/tenants")).json()
+    assert tenants[0]["tokens_used_this_month"] == 1

@@ -20,8 +20,9 @@ from gateway.schemas import (
     Usage,
 )
 
-# Upstream model id that always fails, so tests can exercise the upstream-error path.
-FAILING_MODEL = "mock-error"
+# Upstream model ids that fail, so tests can exercise the upstream-error paths.
+FAILING_MODEL = "mock-error"  # fails immediately
+MIDSTREAM_FAILING_MODEL = "mock-error-midstream"  # streams two chunks, then fails
 
 
 def count_tokens(text: str | None) -> int:
@@ -71,6 +72,8 @@ class MockBackend(Backend):
 
         yield chunk(Delta(role="assistant", content=""))
         for i, word in enumerate(reply.split()):
+            if upstream_model == MIDSTREAM_FAILING_MODEL and i == 1:
+                raise UpstreamError("mock_failure", "mock backend failed mid-stream")
             yield chunk(Delta(content=word if i == 0 else f" {word}"))
         # Final chunk: finish_reason + usage, mirroring OpenAI's include_usage behaviour.
         final = chunk(Delta(), finish="stop")
