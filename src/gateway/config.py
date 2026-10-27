@@ -21,11 +21,6 @@ class Settings(BaseSettings):
     # Upstream timeout. LLM calls are slow, so this is generous; connect timeout stays short.
     upstream_timeout_seconds: float = 120.0
 
-    # Step-1 static catalogue: which backend serves requests and which models it exposes.
-    # (Replaced by the database-backed model registry later.)
-    default_backend: str = "ollama"
-    models: list[str] = ["qwen2.5:0.5b"]
-
     log_level: str = "INFO"
 
 

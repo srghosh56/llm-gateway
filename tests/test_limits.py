@@ -1,12 +1,14 @@
 import json
 
 import httpx
+import pytest
 from fastapi import FastAPI
 
 from gateway.ratelimit import TokenBucketLimiter
 from tests.conftest import make_tenant
 
 CHAT = "/v1/chat/completions"
+pytestmark = pytest.mark.usefixtures("models")
 
 
 def msg(text: str = "one two three", stream: bool = False) -> dict[str, object]:

@@ -10,9 +10,9 @@ from fastapi.responses import StreamingResponse
 from gateway import errors
 from gateway.auth import TenantContext, authenticate_tenant
 from gateway.backends import Backend, UpstreamError
-from gateway.config import Settings
 from gateway.db import Database
 from gateway.quota import record_usage
+from gateway.registry import get_deployed, list_deployed
 from gateway.schemas import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -25,12 +25,20 @@ from gateway.schemas import (
 router = APIRouter(prefix="/v1", tags=["openai"])
 
 
-def _resolve(request: Request, model: str) -> tuple[Backend, str]:
-    settings: Settings = request.app.state.settings
-    if model not in settings.models:
+async def _resolve(request: Request, model: str) -> tuple[Backend, str]:
+    """Public model name -> (backend, upstream model id), via the registry.
+
+    Only "deployed" models resolve; anything else is reported as not found, so clients
+    cannot tell a retired model from one that never existed. One indexed query per request;
+    a short TTL cache would be the next step under heavy load.
+    """
+    db: Database = request.app.state.db
+    async with db.session() as session:
+        entry = await get_deployed(session, model)
+    backends: dict[str, Backend] = request.app.state.backends
+    if entry is None or entry.backend not in backends:
         raise errors.model_not_found(model)
-    backend: Backend = request.app.state.backends[settings.default_backend]
-    return backend, model
+    return backends[entry.backend], entry.upstream_model
 
 
 async def _account(db: Database, tenant: TenantContext, usage: Usage | None) -> None:
@@ -45,8 +53,15 @@ async def _account(db: Database, tenant: TenantContext, usage: Usage | None) -> 
 async def list_models(
     request: Request, _: TenantContext = Depends(authenticate_tenant)
 ) -> ModelList:
-    settings: Settings = request.app.state.settings
-    return ModelList(data=[ModelCard(id=m) for m in settings.models])
+    db: Database = request.app.state.db
+    async with db.session() as session:
+        deployed = await list_deployed(session)
+    return ModelList(
+        data=[
+            ModelCard(id=m.name, created=int(m.created_at.timestamp()), owned_by=m.owner)
+            for m in deployed
+        ]
+    )
 
 
 @router.post("/chat/completions", response_model=None)
@@ -55,7 +70,7 @@ async def chat_completions(
     request: Request,
     tenant: TenantContext = Depends(authenticate_tenant),
 ) -> ChatCompletion | StreamingResponse:
-    backend, upstream_model = _resolve(request, body.model)
+    backend, upstream_model = await _resolve(request, body.model)
 
     if not body.stream:
         try:

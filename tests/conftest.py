@@ -61,8 +61,6 @@ def settings() -> Settings:
     return Settings(
         database_url=TEST_DATABASE_URL,
         admin_api_key=ADMIN_KEY,
-        default_backend="mock",
-        models=["mock-echo", "mock-error"],
     )
 
 
@@ -113,8 +111,31 @@ async def make_tenant(
     return TenantHandle(tenant_id, key, client)
 
 
+async def deploy_model(
+    admin: httpx.AsyncClient, name: str, upstream: str | None = None, backend: str = "mock"
+) -> None:
+    """Walk a model through the full lifecycle: submit -> approve -> deploy."""
+    r = await admin.post(
+        "/admin/models",
+        json={"name": name, "backend": backend, "upstream_model": upstream or name, "owner": "ml"},
+    )
+    assert r.status_code == 201, r.text
+    for action in ("approve", "deploy"):
+        r = await admin.post(f"/admin/models/{name}/{action}")
+        assert r.status_code == 200, r.text
+
+
 @pytest.fixture
-async def tenant(app: FastAPI, admin: httpx.AsyncClient) -> AsyncIterator[TenantHandle]:
+async def models(admin: httpx.AsyncClient) -> None:
+    """Deployed models used by most tests ("mock-error" makes the mock backend fail)."""
+    await deploy_model(admin, "mock-echo")
+    await deploy_model(admin, "mock-error")
+
+
+@pytest.fixture
+async def tenant(
+    app: FastAPI, admin: httpx.AsyncClient, models: None
+) -> AsyncIterator[TenantHandle]:
     handle = await make_tenant(app, admin, rate_limit_rpm=6000, rate_limit_burst=1000)
     yield handle
     await handle.client.aclose()
