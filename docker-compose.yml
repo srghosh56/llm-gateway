@@ -1,0 +1,102 @@
+# Local stack: gateway + postgres + ollama + prometheus + grafana.
+#   cp .env.example .env && docker compose up -d --build && ./scripts/bootstrap.sh
+# Start-up order is expressed with healthchecks and one-shot jobs (migrate, ollama-pull)
+# instead of sleep loops, so `up` is deterministic.
+
+name: llm-gateway
+
+x-gateway-env: &gateway-env
+  GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-gateway}@postgres:5432/gateway
+  GATEWAY_OLLAMA_BASE_URL: http://ollama:11434/v1
+  GATEWAY_ADMIN_API_KEY: ${GATEWAY_ADMIN_API_KEY:?set GATEWAY_ADMIN_API_KEY in .env}
+  GATEWAY_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:16.10-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway}
+      POSTGRES_DB: gateway
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:0.12.6
+    volumes:
+      - ollama:/root/.ollama
+    # Not published to the host: only the gateway talks to Ollama (and the host may already
+    # run its own Ollama on 11434).
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # One-shot: pull the demo model into the shared volume, then exit. Idempotent on restarts.
+  ollama-pull:
+    image: ollama/ollama:0.12.6
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:0.5b}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  # One-shot: apply DB migrations before the gateway starts. Running them as a separate job
+  # (not in the app's entrypoint) avoids races when several gateway replicas start at once.
+  migrate:
+    build: .
+    image: llm-gateway:local
+    command: ["alembic", "upgrade", "head"]
+    environment: *gateway-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    image: llm-gateway:local
+    environment: *gateway-env
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      ollama-pull:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - gateway
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/llm-gateway.json
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  pgdata:
+  ollama:
