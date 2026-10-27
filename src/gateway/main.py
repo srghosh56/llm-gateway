@@ -14,8 +14,10 @@ from gateway.backends import Backend, MockBackend, OllamaBackend
 from gateway.config import Settings, get_settings
 from gateway.db import Database
 from gateway.errors import install_error_handlers
+from gateway.metrics import TenantLabeler
+from gateway.observability import RequestContextMiddleware, configure_logging
 from gateway.ratelimit import TokenBucketLimiter
-from gateway.routers import admin, openai
+from gateway.routers import admin, health, openai
 
 
 def build_backends(settings: Settings) -> dict[str, Backend]:
@@ -29,6 +31,7 @@ def create_app(
     settings: Settings | None = None, backends: dict[str, Backend] | None = None
 ) -> FastAPI:
     settings = settings or get_settings()
+    configure_logging(settings.log_level)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -44,9 +47,12 @@ def create_app(
     app.state.settings = settings
     app.state.rate_limiter = TokenBucketLimiter()
     app.state.admin_auth = StaticKeyAdminAuthenticator(settings.admin_api_key)
+    app.state.tenant_labeler = TenantLabeler(settings.metrics_max_tenants)
     install_error_handlers(app)
+    app.add_middleware(RequestContextMiddleware)
     app.include_router(openai.router)
     app.include_router(admin.router)
+    app.include_router(health.router)
     return app
 
 

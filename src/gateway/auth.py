@@ -23,6 +23,8 @@ from sqlalchemy import select
 
 from gateway import errors
 from gateway.db import ApiKey, Database, Tenant
+from gateway.metrics import TENANT_REJECTIONS, TenantLabeler
+from gateway.observability import tenant_var
 from gateway.quota import used_tokens
 from gateway.ratelimit import TokenBucketLimiter
 
@@ -77,7 +79,10 @@ async def authenticate_tenant(request: Request) -> TenantContext:
         if row is None:
             raise errors.unauthorized()
         tenant: Tenant = row.Tenant
+        tenant_var.set(tenant.name)  # every later log line of this request carries the tenant
+        label: TenantLabeler = request.app.state.tenant_labeler
         if not tenant.active:
+            TENANT_REJECTIONS.labels(label(tenant.name), "disabled").inc()
             raise errors.forbidden("Tenant is disabled.")
 
         limiter: TokenBucketLimiter = request.app.state.rate_limiter
@@ -85,9 +90,11 @@ async def authenticate_tenant(request: Request) -> TenantContext:
             tenant.id, tenant.rate_limit_rpm, tenant.rate_limit_burst
         )
         if not allowed:
+            TENANT_REJECTIONS.labels(label(tenant.name), "rate_limit").inc()
             raise errors.rate_limited(retry_after)
 
         if await used_tokens(session, tenant.id) >= tenant.monthly_token_quota:
+            TENANT_REJECTIONS.labels(label(tenant.name), "quota").inc()
             raise errors.quota_exceeded()
 
     return TenantContext(id=tenant.id, name=tenant.name)

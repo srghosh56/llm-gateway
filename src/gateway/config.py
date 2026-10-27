@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     upstream_timeout_seconds: float = 120.0
 
     log_level: str = "INFO"
+    # Max distinct tenant label values in metrics; the rest are reported as "other".
+    metrics_max_tenants: int = 100
 
 
 @lru_cache

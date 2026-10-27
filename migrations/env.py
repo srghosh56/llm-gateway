@@ -13,7 +13,8 @@ from gateway.db import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Don't disable loggers that already exist (e.g. the app's, when migrating in-process).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # The ORM metadata is the single source of truth; `alembic revision --autogenerate` diffs it.
 target_metadata = Base.metadata
