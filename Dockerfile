@@ -15,6 +15,13 @@ COPY src ./src
 RUN uv sync --frozen --no-dev
 
 FROM ${PYTHON_IMAGE}
+# Apply Debian security updates at build time: a pinned base tag is frozen, so without this
+# fixed OS CVEs (e.g. CVE-2026-57433 in perl-base) stay in the image and fail the Trivy gate.
+# pip is removed because nothing installs packages at runtime (smaller attack surface).
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/* \
+ && python -m pip uninstall -y pip
 # Fixed numeric UID so Kubernetes `runAsNonRoot` can verify it without a passwd lookup.
 RUN groupadd --system --gid 10001 gateway \
  && useradd --system --uid 10001 --gid gateway --no-create-home gateway

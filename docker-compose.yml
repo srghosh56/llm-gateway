@@ -38,12 +38,14 @@ services:
       timeout: 5s
       retries: 30
 
-  # One-shot: pull the demo model into the shared volume, then exit. Idempotent on restarts.
+  # One-shot: pull the demo model into the shared volume, then exit. Skips the pull when the
+  # model is already there, so restarts don't depend on the Ollama registry being reachable.
   ollama-pull:
     image: ollama/ollama:0.12.6
     environment:
       OLLAMA_HOST: ollama:11434
-    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5:0.5b}"]
+      MODEL: ${OLLAMA_MODEL:-qwen2.5:0.5b}
+    entrypoint: ["/bin/sh", "-c", "ollama show \"$$MODEL\" >/dev/null 2>&1 || ollama pull \"$$MODEL\""]
     depends_on:
       ollama:
         condition: service_healthy
