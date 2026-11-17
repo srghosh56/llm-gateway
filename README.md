@@ -250,6 +250,22 @@ applied (no Ollama needed: tests use the `MockBackend`).
 | Tracing | gateway/gen_ai attributes on the server span, stream span + `first_token` event, DB child spans, upstream client span + `traceparent` propagation, probes untraced, `trace_id` in logs, off by default |
 | Backends | Ollama proxy against a fake upstream (`httpx.MockTransport`): payload, SSE parsing, error mapping |
 
+### Load test
+
+`loadtest/locustfile.py` (Locust) mixes non-streaming chat, streaming chat and model listing
+from 20 concurrent users. In CI it runs for 30 s against the real gateway + Postgres with the
+MockBackend, so it measures the gateway's own overhead (auth, rate limit, quota, registry
+lookup, accounting, SSE) and fails the build if more than 1% of requests fail or p95 latency
+exceeds 500 ms. A local run on a laptop: 690 requests, 0 failures, p95 35 ms, ~60 req/s.
+
+```bash
+GATEWAY_ADMIN_API_KEY=... make loadtest          # against a running gateway (compose)
+```
+
+Pointed at a real model (`LOADTEST_MODEL=qwen-small LOADTEST_BACKEND=ollama
+LOADTEST_UPSTREAM=qwen2.5:0.5b`) it measures end-to-end latency, which is dominated by the
+model on CPU, so that variant is for exploration, not a CI gate.
+
 ## Observability
 
 | Metric | Type | Labels |

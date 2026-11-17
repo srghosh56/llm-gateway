@@ -4,13 +4,18 @@ IMAGE   ?= llm-gateway
 TAG     ?= 0.1.0
 NS      ?= llm-gateway
 
-.PHONY: test lint build up down kind-load helm-check argocd-app pf-app bootstrap-k8s
+.PHONY: test lint loadtest build up down kind-load helm-check argocd-app pf-app bootstrap-k8s
 
 test:            ## Run the test suite (needs the test Postgres, see README)
 	uv run pytest
 
 lint:            ## Lint, format check and type check
 	uv run ruff check . && uv run ruff format --check . && uv run mypy
+
+loadtest:        ## 30 s Locust run against a running gateway (GATEWAY_URL, GATEWAY_ADMIN_API_KEY)
+	LOADTEST_API_KEY=$$(uv run python loadtest/setup_tenant.py) \
+	  uv run locust -f loadtest/locustfile.py --headless -u 20 -r 10 -t 30s \
+	  --host $${GATEWAY_URL:-http://localhost:8000} --only-summary
 
 build:           ## Build the container image
 	docker build -t $(IMAGE):$(TAG) .
