@@ -86,9 +86,10 @@ def transition(session: AsyncSession, model: ModelEntry, action: str, actor: Pri
 
 
 async def get_deployed(session: AsyncSession, name: str) -> ModelEntry | None:
-    return await session.scalar(
+    entry: ModelEntry | None = await session.scalar(
         select(ModelEntry).where(ModelEntry.name == name, ModelEntry.status == Status.DEPLOYED)
     )
+    return entry
 
 
 async def list_deployed(session: AsyncSession) -> list[ModelEntry]:

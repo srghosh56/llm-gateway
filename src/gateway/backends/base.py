@@ -8,6 +8,8 @@ OpenAI-compatible. Adding vLLM or a hosted API means one new subclass, nothing e
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
+from opentelemetry.sdk.trace import TracerProvider
+
 from gateway.schemas import ChatCompletion, ChatCompletionChunk, ChatCompletionRequest
 
 
@@ -33,6 +35,9 @@ class Backend(ABC):
         self, request: ChatCompletionRequest, upstream_model: str
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Yield chunks. The last chunk should carry ``usage`` so tokens can be metered."""
+
+    def instrument(self, provider: TracerProvider) -> None:  # noqa: B027 - optional hook
+        """Enable tracing of upstream calls (backends that make HTTP calls override this)."""
 
     async def aclose(self) -> None:  # noqa: B027 - optional hook, default no-op
         """Release connections on shutdown."""

@@ -32,6 +32,7 @@ from gateway.schemas import (
     ModelList,
     Usage,
 )
+from gateway.tracing import add_event, annotate
 
 router = APIRouter(prefix="/v1", tags=["openai"])
 log = logging.getLogger("gateway.chat")
@@ -71,6 +72,13 @@ class Meter:
 
     async def finish(self, usage: Usage | None, outcome: str = "success") -> None:
         elapsed = time.perf_counter() - self.started
+        annotate(
+            **{
+                "gateway.outcome": outcome,
+                "gen_ai.usage.input_tokens": usage.prompt_tokens if usage else None,
+                "gen_ai.usage.output_tokens": usage.completion_tokens if usage else None,
+            }
+        )
         TENANT_REQUESTS.labels(self.tenant_label, self.model, outcome).inc()
         if usage is not None:
             TENANT_TOKENS.labels(self.tenant_label, self.model, "prompt").inc(usage.prompt_tokens)
@@ -115,6 +123,16 @@ async def chat_completions(
     tenant: TenantContext = Depends(authenticate_tenant),
 ) -> ChatCompletion | StreamingResponse:
     backend, upstream_model = await _resolve(request, body.model)
+    annotate(
+        **{
+            "gateway.tenant": tenant.name,
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": body.model,
+            "gen_ai.system": backend.name,
+            "gateway.upstream_model": upstream_model,
+            "gateway.stream": body.stream,
+        }
+    )
     labeler: TenantLabeler = request.app.state.tenant_labeler
     meter = Meter(request.app.state.db, tenant, labeler(tenant.name), body.model, backend.name)
 
@@ -141,6 +159,7 @@ async def chat_completions(
         await meter.finish(None, "upstream_error")
         raise errors.upstream_error() from exc
     TIME_TO_FIRST_TOKEN.labels(body.model).observe(time.perf_counter() - meter.started)
+    add_event("first_token")
 
     include_usage = bool(body.stream_options and body.stream_options.include_usage)
     return StreamingResponse(

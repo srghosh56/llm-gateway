@@ -15,6 +15,9 @@ x-gateway-env: &gateway-env
   GATEWAY_OIDC_ISSUER: http://localhost:${KEYCLOAK_PORT:-8081}/realms/llm-gateway
   GATEWAY_OIDC_JWKS_URL: http://keycloak:8080/realms/llm-gateway/protocol/openid-connect/certs
   GATEWAY_OIDC_AUDIENCE: llm-gateway
+  # Tracing: OTLP/HTTP to Jaeger (UI on http://localhost:16686).
+  GATEWAY_OTEL_ENABLED: "true"
+  GATEWAY_OTEL_ENDPOINT: http://jaeger:4318
 
 services:
   postgres:
@@ -101,6 +104,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+
+  # Trace backend: Jaeger v2 all-in-one accepts OTLP on 4317 (gRPC) / 4318 (HTTP), keeps
+  # traces in memory (lost on restart; fine for a demo) and serves the UI on 16686.
+  jaeger:
+    image: jaegertracing/jaeger:2.11.0
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
 
   prometheus:
     image: prom/prometheus:v3.5.0

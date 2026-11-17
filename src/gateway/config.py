@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     # Upstream timeout. LLM calls are slow, so this is generous; connect timeout stays short.
     upstream_timeout_seconds: float = 120.0
 
+    # OpenTelemetry tracing (OTLP over HTTP, e.g. Jaeger's port 4318). Off by default.
+    otel_enabled: bool = False
+    otel_endpoint: str = "http://localhost:4318"
+    otel_service_name: str = "llm-gateway"
+    otel_sample_ratio: float = 1.0
+
     log_level: str = "INFO"
     # Max distinct tenant label values in metrics; the rest are reported as "other".
     metrics_max_tenants: int = 100
