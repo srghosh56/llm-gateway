@@ -28,6 +28,9 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
+      # Helm is preinstalled on GitHub's Ubuntu runners.
+      - run: helm lint charts/llm-gateway
+      - run: helm template llm-gateway charts/llm-gateway --namespace llm-gateway > /dev/null
 
   test:
     runs-on: ubuntu-24.04
