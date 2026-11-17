@@ -4,20 +4,35 @@ A small, production-style, **multi-tenant, OpenAI-compatible LLM gateway** in Py
 
 Point any OpenAI client (SDK, LangChain, curl) at it, and it adds what a platform team needs
 in front of self-hosted models: per-tenant API keys, rate limits and monthly token quotas, a
-governed model registry with an audit trail, Prometheus metrics and structured logs.
+governed model registry with an approval workflow and audit trail, admin single sign-on via
+Keycloak (OIDC), Prometheus metrics, OpenTelemetry traces and structured logs. It ships as a
+docker compose stack and as a Helm chart deployed by Argo CD.
 
-It's deliberately small (~1,600 lines of application code, including comments) so every design decision can be read and
-explained. Stack: Python 3.12, FastAPI, SQLAlchemy 2 (async) + Alembic, PostgreSQL, httpx,
-prometheus_client, OpenTelemetry, Keycloak (OIDC), pytest. Models are served by [Ollama](https://ollama.com) (`qwen2.5:0.5b`
-by default, small enough to run on a laptop CPU).
+It's deliberately small (~1,950 lines of application code including comments, ~1,250 lines
+of tests) so every design decision can be read and explained.
+
+| Area | Technology |
+|---|---|
+| API | Python 3.12, FastAPI, Pydantic, httpx, Server-Sent Events |
+| Data | PostgreSQL, SQLAlchemy 2.0 (async, asyncpg), Alembic migrations |
+| Models | [Ollama](https://ollama.com) (`qwen2.5:0.5b`, runs on a laptop CPU); MockBackend for tests |
+| Auth | per-tenant API keys (SHA-256), admin OIDC via Keycloak (JWT + JWKS) |
+| Observability | Prometheus, Grafana, OpenTelemetry -> Jaeger, JSON logs |
+| Delivery | Docker (non-root), docker compose, Helm, Argo CD, kind |
+| Quality | pytest (96 tests, ~97% coverage), Locust load test, ruff, mypy --strict, Trivy, GitHub Actions |
 
 ## Architecture
 
 ```
-                    OpenAI SDK / curl / any OpenAI-compatible client
-                                         |
-                       Authorization: Bearer gw_...  (tenant key)
-                                         v
+   OpenAI SDK / curl / any OpenAI client          admin (curl / CLI)
+                    |                                    |  1. log in (alice/bob)
+     Authorization: Bearer gw_...                        v
+       (tenant API key)                           +-------------+
+                    |                             |  Keycloak   |  realm llm-gateway,
+                    |       2. Bearer <JWT> ----- |   (OIDC)    |  role platform-admin
+                    v              |              +------+------+
+                                   |                     | JWKS (public signing keys)
+                                   v                     v
  +-----------------------------------------------------------------------------------+
  |  llm-gateway (FastAPI)                                                            |
  |                                                                                   |
@@ -34,19 +49,23 @@ by default, small enough to run on a laptop CPU).
  |                       +-------+-------+     +-----------------+                   |
  |  Meter: record tokens -> quota table, Prometheus counters, completion log line    |
  |                                                                                   |
- |  /admin/*  (admin key -> Principal{roles})  tenants, keys, models, audit log      |
- |  /metrics  /healthz  /readyz                                                      |
- +--------+-------------------------------------+---------------------+--------------+
-          |                                     |                     |
-          v                                     v                     ^ scrape
-   +-------------+                     +-----------------+     +-------------+     +---------+
-   | PostgreSQL  |                     | Ollama          |     | Prometheus  | --> | Grafana |
-   | tenants     |                     | /v1 (OpenAI API)|     +-------------+     +---------+
-   | api_keys    |                     | qwen2.5:0.5b    |
-   | token_usage |                     +-----------------+
-   | models      |
-   | audit_log   |
-   +-------------+
+ |  /admin/*  (static key OR Keycloak JWT -> Principal{roles})  tenants, keys,       |
+ |            models (approval workflow), audit log                                  |
+ |  /metrics  /healthz  /readyz           OpenTelemetry: spans for request, DB, HTTP |
+ +--------+-------------------------------------+---------------------+-------+------+
+          |                                     |                     |       |
+          v                                     v                     ^ scrape| OTLP
+   +-------------+                     +-----------------+     +-------------+ | +--------+
+   | PostgreSQL  |                     | Ollama          |     | Prometheus  | | | Jaeger |
+   | tenants     |                     | /v1 (OpenAI API)|     +------+------+ +>| traces |
+   | api_keys    |                     | qwen2.5:0.5b    |            v          +--------+
+   | token_usage |                     +-----------------+     +-------------+
+   | models      |                                             |   Grafana   |
+   | audit_log   |                                             |  dashboard  |
+   +-------------+                                             +-------------+
+
+ Runs as: docker compose (all of the above)  or  Kubernetes: Helm chart synced by Argo CD
+ (gateway, Postgres, Ollama + ServiceMonitor/alerts/dashboard into kube-prometheus-stack)
 ```
 
 Model lifecycle (enforced in `src/gateway/registry.py`; only `deployed` is served):
@@ -62,7 +81,8 @@ Requires Docker. The first start downloads the images and the ~400 MB model.
 
 ```bash
 cp .env.example .env            # then change GATEWAY_ADMIN_API_KEY
-docker compose up -d --build    # postgres, migrate, ollama, ollama-pull, gateway, prometheus, grafana
+docker compose up -d --build    # postgres, migrate, ollama, ollama-pull, gateway,
+                                #   keycloak, jaeger, prometheus, grafana
 ./scripts/bootstrap.sh          # deploys model "qwen-small", creates tenant "demo", prints its key
 ```
 
@@ -388,10 +408,20 @@ src/gateway/
   routers/           openai.py, admin.py, health.py
 migrations/          Alembic migrations
 tests/               pytest suite (real Postgres + MockBackend)
+loadtest/            Locust load test + tenant setup (CI performance gate)
 charts/llm-gateway/  Helm chart (gateway, Postgres, Ollama, ServiceMonitor, alerts, dashboard)
 argocd/              Argo CD Application (auto-sync, prune, self-heal)
 deploy/              Prometheus scrape config, Grafana provisioning, Keycloak realm
+scripts/bootstrap.sh demo setup through the admin API (model + tenant + key)
+Makefile             shortcuts: test, lint, loadtest, build, kind-load, argocd-app, ...
 ```
+
+## Development workflow
+
+`main` only changes through pull requests: each feature lives on its own branch
+(`feat/oidc-keycloak`, `feat/otel-tracing`, `feat/helm-argocd`, `feat/load-tests`, ...), CI
+(lint, tests, load test, image build + Trivy) runs on the pull request, and the branch is
+merged once CI is green. Argo CD deploys whatever is on `main`, so merging is deploying.
 
 ## License
 
