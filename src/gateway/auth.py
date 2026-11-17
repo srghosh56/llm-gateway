@@ -127,6 +127,23 @@ class StaticKeyAdminAuthenticator:
         return None
 
 
+class ChainAdminAuthenticator:
+    """Tries each authenticator in order; the first that recognises the token wins.
+
+    Lets the static key (break-glass / automation) and OIDC (humans via SSO) coexist.
+    """
+
+    def __init__(self, *authenticators: AdminAuthenticator) -> None:
+        self._authenticators = authenticators
+
+    async def authenticate(self, token: str) -> Principal | None:
+        for authenticator in self._authenticators:
+            principal = await authenticator.authenticate(token)
+            if principal is not None:
+                return principal
+        return None
+
+
 async def require_admin(request: Request) -> Principal:
     """FastAPI dependency for /admin routes."""
     token = bearer_token(request)

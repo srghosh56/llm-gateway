@@ -71,6 +71,7 @@ docker compose up -d --build    # postgres, migrate, ollama, ollama-pull, gatewa
 | Gateway (OpenAPI docs at `/docs`) | http://localhost:8000 |
 | Prometheus | http://localhost:9090 |
 | Grafana, dashboard "LLM Gateway" (anonymous viewer; admin/admin) | http://localhost:3000 |
+| Keycloak (admin console: admin/admin; realm `llm-gateway`) | http://localhost:8081 |
 
 ### Local development
 
@@ -158,6 +159,28 @@ curl -s -X POST localhost:8000/admin/models/qwen-small/retire  -H "$ADMIN"
 curl -s "localhost:8000/admin/audit?target_type=model&limit=20" -H "$ADMIN"
 ```
 
+### Admin SSO with Keycloak (OIDC)
+
+The compose stack includes Keycloak (http://localhost:8081, console login `admin`/`admin`)
+with an imported realm `llm-gateway`: user **alice** has the realm role `platform-admin`,
+user **bob** does not. The gateway validates the JWT access token against the realm's JWKS
+(signature, `RS256` only, `exp`, `iss`, `aud=llm-gateway`) and maps `platform-admin` to admin.
+The static admin key keeps working next to it (break-glass / automation).
+
+```bash
+token() { curl -s http://localhost:8081/realms/llm-gateway/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=llm-gateway-cli -d username=$1 -d password=$1 \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])"; }
+
+curl -s localhost:8000/admin/models -H "Authorization: Bearer $(token alice)"   # 200
+curl -s localhost:8000/admin/models -H "Authorization: Bearer $(token bob)"     # 403
+curl -s "localhost:8000/admin/audit?limit=1" -H "Authorization: Bearer $(token alice)"
+# -> actor "oidc:alice"
+```
+
+The password grant is used only to keep the demo to one `curl`; a real admin CLI would use
+the authorization-code + PKCE or device flow, which produce the same kind of token.
+
 ### Error codes
 
 | Status | `error.code` | When |
@@ -173,7 +196,7 @@ curl -s "localhost:8000/admin/audit?target_type=model&limit=20" -H "$ADMIN"
 
 ## Tests
 
-75 pytest tests, 98% line coverage, run against a real PostgreSQL with the Alembic migrations
+89 pytest tests, 98% line coverage, run against a real PostgreSQL with the Alembic migrations
 applied (no Ollama needed: tests use the `MockBackend`).
 
 | Area | What is asserted |
@@ -181,6 +204,7 @@ applied (no Ollama needed: tests use the `MockBackend`).
 | OpenAI API | non-stream and SSE stream shape, `[DONE]`, `include_usage`, 400/404/502 errors |
 | OpenAI SDK | the official `openai` client: list models, completion, streaming, typed exceptions |
 | Auth | 401 missing/wrong/revoked key, 403 disabled tenant, keys stored only as hashes, admin key required |
+| OIDC | admin role 200, missing role 403, expired/wrong issuer/wrong audience/foreign signature/`alg: none`/HS256 confusion 401, JWKS cache, key rotation, refetch rate limit, IdP outage |
 | Rate limit | token bucket burst/refill/cap (fake clock), per-tenant isolation, 429 + `Retry-After` |
 | Quota | usage recorded for JSON and streamed responses, 429 `insufficient_quota`, raising quota unblocks |
 | Registry | every (from, to) transition pair, lifecycle controls serving and listing, 409s, audit rows |
@@ -231,9 +255,12 @@ and `tenant`. `/healthz` is liveness (process up); `/readyz` is readiness (datab
 - **Registry as an explicit transition table** with `SELECT ... FOR UPDATE` against racing
   admins. Every mutation writes its `audit_log` row **in the same transaction**, so no change
   can exist without its audit record. Non-deployed models return 404, the same as unknown ones.
-- **Pluggable admin auth.** Endpoints depend on a `Principal(subject, roles)` and check the
-  `platform-admin` role; today a static key produces that principal (constant-time compare),
-  and an OIDC/JWT authenticator can replace it without touching the endpoints.
+- **Pluggable admin auth.** Endpoints only depend on a `Principal(subject, roles)` and check
+  the `platform-admin` role. Two authenticators produce it, tried in order: a static key
+  (constant-time compare) and OIDC (Keycloak JWTs). OIDC validation pins the algorithm
+  allow-list (blocks `alg: none` and RS256->HS256 key confusion), requires `exp`/`iss`/`aud`,
+  caches the JWKS and refetches on an unknown `kid` (key rotation) at most every 30 s, and
+  keeps the cached keys if the identity provider is briefly down.
 - **Bounded metric cardinality.** Routes are labelled by template, models only by registry
   names, tenants are capped (first N, then `other`), and error reasons come from a fixed
   vocabulary.
@@ -249,8 +276,8 @@ and `tenant`. `/healthz` is liveness (process up); `/readyz` is readiness (datab
   in-memory limits multiply with replicas and reset on restart.
 - **Hard quotas and billing-grade metering:** reserve `max_tokens` before the call and
   reconcile afterwards; write usage events to a durable log for invoicing.
-- **SSO for admins (OIDC)** with separation of duties (submitter ≠ approver), and scoped,
-  expiring tenant keys with rotation.
+- **Separation of duties** in the registry (submitter ≠ approver, now possible since admins
+  have individual OIDC identities), and scoped, expiring tenant keys with rotation.
 - **Cache registry lookups and key lookups** (short TTL, invalidated on change) to take two
   queries off the hot path.
 - **Resilience:** per-backend timeouts and circuit breakers, retries with jitter before the
@@ -272,6 +299,7 @@ src/gateway/
   schemas.py         OpenAI request/response models
   errors.py          OpenAI-style error envelope + handlers
   auth.py            API key hashing, tenant auth, pluggable admin auth
+  oidc.py            OIDC/JWT admin authenticator (JWKS cache, key rotation)
   ratelimit.py       token bucket
   quota.py           monthly token usage (atomic upsert)
   registry.py        model lifecycle state machine + audit helper

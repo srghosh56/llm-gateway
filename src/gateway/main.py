@@ -9,13 +9,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from gateway.auth import StaticKeyAdminAuthenticator
+from gateway.auth import AdminAuthenticator, ChainAdminAuthenticator, StaticKeyAdminAuthenticator
 from gateway.backends import Backend, MockBackend, OllamaBackend
 from gateway.config import Settings, get_settings
 from gateway.db import Database
 from gateway.errors import install_error_handlers
 from gateway.metrics import TenantLabeler
 from gateway.observability import RequestContextMiddleware, configure_logging
+from gateway.oidc import OIDCAdminAuthenticator
 from gateway.ratelimit import TokenBucketLimiter
 from gateway.routers import admin, health, openai
 
@@ -25,6 +26,18 @@ def build_backends(settings: Settings) -> dict[str, Backend]:
         "mock": MockBackend(),
         "ollama": OllamaBackend(settings.ollama_base_url, settings.upstream_timeout_seconds),
     }
+
+
+def build_admin_auth(
+    settings: Settings,
+) -> tuple[AdminAuthenticator, OIDCAdminAuthenticator | None]:
+    static = StaticKeyAdminAuthenticator(settings.admin_api_key)
+    if not settings.oidc_issuer:
+        return static, None
+    oidc = OIDCAdminAuthenticator(
+        settings.oidc_issuer, settings.oidc_audience, jwks_url=settings.oidc_jwks_url
+    )
+    return ChainAdminAuthenticator(static, oidc), oidc
 
 
 def create_app(
@@ -40,13 +53,15 @@ def create_app(
         yield
         for backend in app.state.backends.values():
             await backend.aclose()
+        if oidc is not None:
+            await oidc.aclose()
         await app.state.db.dispose()
 
     app = FastAPI(title="llm-gateway", version="0.1.0", lifespan=lifespan)
     # State lives on the app instance (not module globals) so tests get isolated apps.
     app.state.settings = settings
     app.state.rate_limiter = TokenBucketLimiter()
-    app.state.admin_auth = StaticKeyAdminAuthenticator(settings.admin_api_key)
+    app.state.admin_auth, oidc = build_admin_auth(settings)
     app.state.tenant_labeler = TenantLabeler(settings.metrics_max_tenants)
     install_error_handlers(app)
     app.add_middleware(RequestContextMiddleware)

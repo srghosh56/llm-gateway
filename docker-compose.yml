@@ -10,6 +10,11 @@ x-gateway-env: &gateway-env
   GATEWAY_OLLAMA_BASE_URL: http://ollama:11434/v1
   GATEWAY_ADMIN_API_KEY: ${GATEWAY_ADMIN_API_KEY:?set GATEWAY_ADMIN_API_KEY in .env}
   GATEWAY_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-INFO}
+  # OIDC: tokens carry the browser-facing issuer (localhost:8081, fixed via KC_HOSTNAME), but
+  # inside the compose network the gateway fetches signing keys from keycloak:8080.
+  GATEWAY_OIDC_ISSUER: http://localhost:${KEYCLOAK_PORT:-8081}/realms/llm-gateway
+  GATEWAY_OIDC_JWKS_URL: http://keycloak:8080/realms/llm-gateway/protocol/openid-connect/certs
+  GATEWAY_OIDC_AUDIENCE: llm-gateway
 
 services:
   postgres:
@@ -74,6 +79,28 @@ services:
       ollama-pull:
         condition: service_completed_successfully
     restart: unless-stopped
+
+  # Identity provider for admin SSO. Dev mode + realm import: users alice (platform-admin) and
+  # bob (no admin role). The gateway does not depend_on it: keys are fetched lazily.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.2
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      # Fixed public URL: every token gets the same "iss", whoever asked for it.
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8081}
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./deploy/keycloak/llm-gateway-realm.json:/opt/keycloak/data/import/llm-gateway-realm.json:ro
+    ports:
+      - "${KEYCLOAK_PORT:-8081}:8080"
+    healthcheck:
+      # The image has no curl; probe the management port with bash's /dev/tcp.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   prometheus:
     image: prom/prometheus:v3.5.0
