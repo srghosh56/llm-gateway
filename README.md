@@ -8,7 +8,7 @@ governed model registry with an audit trail, Prometheus metrics and structured l
 
 It's deliberately small (~1,600 lines of application code, including comments) so every design decision can be read and
 explained. Stack: Python 3.12, FastAPI, SQLAlchemy 2 (async) + Alembic, PostgreSQL, httpx,
-prometheus_client, pytest. Models are served by [Ollama](https://ollama.com) (`qwen2.5:0.5b`
+prometheus_client, OpenTelemetry, Keycloak (OIDC), pytest. Models are served by [Ollama](https://ollama.com) (`qwen2.5:0.5b`
 by default, small enough to run on a laptop CPU).
 
 ## Architecture
@@ -72,6 +72,7 @@ docker compose up -d --build    # postgres, migrate, ollama, ollama-pull, gatewa
 | Prometheus | http://localhost:9090 |
 | Grafana, dashboard "LLM Gateway" (anonymous viewer; admin/admin) | http://localhost:3000 |
 | Keycloak (admin console: admin/admin; realm `llm-gateway`) | http://localhost:8081 |
+| Jaeger UI (traces, service `llm-gateway`) | http://localhost:16686 |
 
 ### Local development
 
@@ -196,7 +197,7 @@ the authorization-code + PKCE or device flow, which produce the same kind of tok
 
 ## Tests
 
-89 pytest tests, 98% line coverage, run against a real PostgreSQL with the Alembic migrations
+96 pytest tests, 98% line coverage, run against a real PostgreSQL with the Alembic migrations
 applied (no Ollama needed: tests use the `MockBackend`).
 
 | Area | What is asserted |
@@ -209,6 +210,7 @@ applied (no Ollama needed: tests use the `MockBackend`).
 | Quota | usage recorded for JSON and streamed responses, 429 `insufficient_quota`, raising quota unblocks |
 | Registry | every (from, to) transition pair, lifecycle controls serving and listing, 409s, audit rows |
 | Observability | metric deltas per tenant/model, route-template labels, upstream errors, label cap, request ids, JSON logs, probes |
+| Tracing | gateway/gen_ai attributes on the server span, stream span + `first_token` event, DB child spans, upstream client span + `traceparent` propagation, probes untraced, `trace_id` in logs, off by default |
 | Backends | Ollama proxy against a fake upstream (`httpx.MockTransport`): payload, SSE parsing, error mapping |
 
 ## Observability
@@ -224,8 +226,28 @@ applied (no Ollama needed: tests use the `MockBackend`).
 | `gateway_upstream_errors_total` | counter | backend, reason (timeout/connect/http_5xx/...) |
 
 Logs are one JSON object per line, and every line carries `request_id` (taken from an incoming
-`X-Request-ID` if it's safe, otherwise generated, and always echoed in the response header)
-and `tenant`. `/healthz` is liveness (process up); `/readyz` is readiness (database reachable).
+`X-Request-ID` if it's safe, otherwise generated, and always echoed in the response header),
+`tenant`, and, when tracing is on, `trace_id`/`span_id`. `/healthz` is liveness (process up);
+`/readyz` is readiness (database reachable).
+
+### Tracing (OpenTelemetry -> Jaeger)
+
+With `GATEWAY_OTEL_ENABLED=true` (set in compose) every request becomes one trace, exported
+over OTLP/HTTP to Jaeger:
+
+```
+POST /v1/chat/completions   9423 ms  gateway.tenant=demo gen_ai.request.model=qwen-small
+├── SELECT api_keys ...        0.6 ms   (auth)                gen_ai.usage.input_tokens=31
+├── SELECT token_usage ...     0.3 ms   (quota)               gen_ai.usage.output_tokens=30
+├── SELECT models ...          0.4 ms   (registry)            gateway.outcome=success
+├── POST ollama:11434/v1/...  9364 ms   (upstream, traceparent propagated)
+└── INSERT token_usage ...     5.5 ms   (usage accounting)
+```
+
+To go from a log line to its trace, copy `trace_id` from the JSON log and open
+`http://localhost:16686/trace/<trace_id>`. Probes and `/metrics` aren't traced, per-chunk
+ASGI send spans are disabled (a stream would otherwise create one span per token), and
+sampling is parent-based with a configurable ratio (`GATEWAY_OTEL_SAMPLE_RATIO`).
 
 ## Design decisions
 
@@ -286,7 +308,8 @@ and `tenant`. `/healthz` is liveness (process up); `/readyz` is readiness (datab
 - **Security hardening:** TLS everywhere, secrets from a secret manager, request size
   limits, prompt/response logging policy (PII), network policies, image signing (cosign) and
   SBOMs.
-- **Tracing** (OpenTelemetry) and SLO-based alerting (e.g. on TTFT p95 and upstream error rate).
+- **SLO-based alerting** (e.g. on TTFT p95 and upstream error rate), and tail-based trace
+  sampling in an OpenTelemetry Collector (keep all slow and failed traces, sample the rest).
 - **Kubernetes deployment** via a Helm chart with HPA, PodDisruptionBudget and a
   ServiceMonitor, delivered with GitOps.
 
@@ -306,6 +329,7 @@ src/gateway/
   db.py              ORM tables + engine/session
   metrics.py         Prometheus metrics, tenant label cap
   observability.py   JSON logging, request-id/latency ASGI middleware
+  tracing.py         OpenTelemetry setup (FastAPI, SQLAlchemy, httpx) and span helpers
   backends/          Backend ABC, OllamaBackend, MockBackend
   routers/           openai.py, admin.py, health.py
 migrations/          Alembic migrations

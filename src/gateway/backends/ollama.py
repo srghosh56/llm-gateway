@@ -9,6 +9,8 @@ import json
 from collections.abc import AsyncIterator
 
 import httpx
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.sdk.trace import TracerProvider
 
 from gateway.backends.base import Backend, UpstreamError
 from gateway.schemas import ChatCompletion, ChatCompletionChunk, ChatCompletionRequest
@@ -75,6 +77,11 @@ class OllamaBackend(Backend):
                     yield ChatCompletionChunk.model_validate(json.loads(data))
         except httpx.HTTPError as exc:
             raise _classify(exc) from exc
+
+    def instrument(self, provider: TracerProvider) -> None:
+        # Client span per upstream call + W3C traceparent header, so Ollama (or any traced
+        # upstream) joins the same trace.
+        HTTPXClientInstrumentor.instrument_client(self._client, tracer_provider=provider)
 
     async def aclose(self) -> None:
         await self._client.aclose()

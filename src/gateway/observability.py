@@ -18,6 +18,7 @@ from typing import Any
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from gateway.metrics import REQUEST_LATENCY
+from gateway.tracing import annotate, current_ids
 
 # ContextVars are per-task (and copied into child tasks), so concurrent requests never see
 # each other's ids even though they share one thread.
@@ -43,6 +44,8 @@ class JsonFormatter(logging.Formatter):
             "request_id": request_id_var.get(),
             "tenant": tenant_var.get(),
         }
+        # Trace correlation: paste trace_id into Jaeger to see the whole request.
+        entry["trace_id"], entry["span_id"] = current_ids()
         entry.update({k: v for k, v in vars(record).items() if k not in _STD_ATTRS})
         if record.exc_info:
             entry["exc"] = self.formatException(record.exc_info)
@@ -74,6 +77,7 @@ class RequestContextMiddleware:
         request_id = incoming if _SAFE_ID.match(incoming) else uuid.uuid4().hex
         rid_token = request_id_var.set(request_id)
         tenant_token = tenant_var.set(None)
+        annotate(**{"gateway.request_id": request_id})
         start = time.perf_counter()
         status = 500  # if the app crashes before sending a response
 
@@ -102,6 +106,7 @@ class RequestContextMiddleware:
                     # is formatted later, e.g. by a queue handler.
                     "request_id": request_id,
                     "tenant": tenant_var.get(),
+                    "trace_id": current_ids()[0],
                     "method": scope["method"],
                     "route": route,
                     "path": scope["path"],
