@@ -58,6 +58,42 @@ jobs:
       # Fails if the ORM models and the migrations have drifted apart.
       - run: uv run alembic upgrade head && uv run alembic check
 
+  # Load test: start the real gateway (MockBackend, so only gateway overhead is measured) on
+  # a Postgres service and run Locust headless. Fails on >1% errors or p95 > 500 ms.
+  loadtest:
+    runs-on: ubuntu-24.04
+    needs: test
+    services:
+      postgres:
+        image: postgres:16.10-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: gateway
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/gateway
+      GATEWAY_ADMIN_API_KEY: ci-loadtest-admin
+      GATEWAY_LOG_LEVEL: WARNING
+      GATEWAY_URL: http://localhost:8000
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run alembic upgrade head
+      - name: Run gateway and Locust
+        run: |
+          uv run uvicorn --factory gateway.main:app --port 8000 --no-access-log &
+          for i in $(seq 1 30); do curl -sf $GATEWAY_URL/readyz && break; sleep 1; done
+          export LOADTEST_API_KEY="$(uv run python loadtest/setup_tenant.py)"
+          uv run locust -f loadtest/locustfile.py --headless -u 20 -r 10 -t 30s \
+            --host $GATEWAY_URL --only-summary
+
   image:
     runs-on: ubuntu-24.04
     steps:
