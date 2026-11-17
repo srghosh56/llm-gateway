@@ -84,6 +84,43 @@ uv run pytest                  # tests use the MockBackend, no Ollama needed
 uv run ruff check . && uv run mypy
 ```
 
+## Kubernetes (Helm + Argo CD)
+
+`charts/llm-gateway` deploys the gateway (2 replicas, zero-downtime rolling updates, PDB),
+Postgres (StatefulSet) and Ollama (Deployment + model PVC), plus a ServiceMonitor,
+PrometheusRule alerts and the Grafana dashboard as a ConfigMap. It's built for the kind
+cluster from [gitops-microservice-demo](https://github.com/srghosh56/gitops-microservice-demo)
+(Argo CD + kube-prometheus-stack via Terraform) and follows that repo's conventions.
+
+```bash
+# in gitops-microservice-demo: make cluster && make platform    (once)
+make kind-load                  # build llm-gateway:0.1.0 and load it into the kind node
+make argocd-app                 # Argo CD syncs charts/llm-gateway from this repo's main branch
+kubectl -n llm-gateway get pods # 2x gateway, postgres-0, ollama; Jobs: migrate (done), ollama-pull
+make pf-app                     # http://localhost:8091
+make bootstrap-k8s              # deploy qwen-small + demo tenant via the admin API
+```
+
+How the sync is ordered (Argo CD sync waves and hooks):
+
+```
+wave -1  Postgres StatefulSet + Service      (must be healthy before migrating)
+wave  0  migrate Job (Sync hook)             alembic upgrade head, once per sync
+wave  1  gateway Deployment                  readiness = database reachable
+PostSync ollama-pull Job                     pulls the model, skipped if already on the PVC
+```
+
+Every container runs as non-root with a read-only root filesystem, no capabilities, no
+service-account token and a RuntimeDefault seccomp profile (Trivy config scan: no HIGH or
+CRITICAL findings). Prometheus picks up the ServiceMonitor (the platform selects
+ServiceMonitors in all namespaces) and Grafana loads the dashboard via its sidecar
+(`grafana_dashboard: "1"`). Alerts: upstream error ratio > 5% for 5 min, p95 time to first
+token > 10 s for 10 min.
+
+Secrets: by default the chart renders a demo Secret from `values.yaml` (fine for a local
+kind cluster, never for anything shared). For real use, create the Secret out of band (or
+with External Secrets / Sealed Secrets) and set `secrets.existingSecret`.
+
 ## API examples
 
 The bootstrap script prints these two exports:
@@ -310,8 +347,9 @@ sampling is parent-based with a configurable ratio (`GATEWAY_OTEL_SAMPLE_RATIO`)
   SBOMs.
 - **SLO-based alerting** (e.g. on TTFT p95 and upstream error rate), and tail-based trace
   sampling in an OpenTelemetry Collector (keep all slow and failed traces, sample the rest).
-- **Kubernetes deployment** via a Helm chart with HPA, PodDisruptionBudget and a
-  ServiceMonitor, delivered with GitOps.
+- **Kubernetes hardening:** publish signed images to a registry (pinned by digest instead of
+  `kind load`), Ingress with TLS, HPA on request rate, NetworkPolicies, secrets from External
+  Secrets, and a managed Postgres instead of the in-chart StatefulSet.
 
 ## Project layout
 
@@ -334,7 +372,9 @@ src/gateway/
   routers/           openai.py, admin.py, health.py
 migrations/          Alembic migrations
 tests/               pytest suite (real Postgres + MockBackend)
-deploy/              Prometheus scrape config, Grafana provisioning + dashboard
+charts/llm-gateway/  Helm chart (gateway, Postgres, Ollama, ServiceMonitor, alerts, dashboard)
+argocd/              Argo CD Application (auto-sync, prune, self-heal)
+deploy/              Prometheus scrape config, Grafana provisioning, Keycloak realm
 ```
 
 ## License

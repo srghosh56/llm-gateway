@@ -1,0 +1,37 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "llm-gateway.fullname" . }}
+  labels:
+    {{- include "llm-gateway.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: llm-gateway
+      rules:
+        - alert: LLMGatewayUpstreamErrors
+          # Share of chat requests that failed at the model backend.
+          expr: |
+            sum(rate(gateway_upstream_errors_total[5m]))
+              /
+            clamp_min(sum(rate(gateway_tenant_requests_total[5m])), 1e-9)
+              > {{ .Values.prometheusRule.upstreamErrorRatio }}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "More than {{ mulf .Values.prometheusRule.upstreamErrorRatio 100 }}% of LLM requests fail upstream"
+            description: "Upstream error ratio is {{ "{{" }} $value | humanizePercentage {{ "}}" }}. Check the model backend (Ollama) pods and gateway_upstream_errors_total by reason."
+            runbook_url: {{ .Values.prometheusRule.runbookUrl | quote }}
+        - alert: LLMGatewaySlowFirstToken
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(gateway_time_to_first_token_seconds_bucket[10m])))
+              > {{ .Values.prometheusRule.ttftP95Seconds }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "p95 time to first token above {{ .Values.prometheusRule.ttftP95Seconds }}s"
+            description: "Streaming users wait {{ "{{" }} $value | humanizeDuration {{ "}}" }} for the first token. Usually CPU saturation on the model server."
+            runbook_url: {{ .Values.prometheusRule.runbookUrl | quote }}
+{{- end }}

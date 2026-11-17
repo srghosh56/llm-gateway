@@ -1,0 +1,150 @@
+{{- if .Values.ollama.enabled }}
+{{- $name := printf "%s-ollama" (include "llm-gateway.fullname" .) }}
+# Ollama model server (CPU). Models live on a PVC so pod restarts don't re-download them.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-models
+  labels:
+    {{- include "llm-gateway.labels" . | nindent 4 }}
+  annotations:
+    # Model cache (GBs): keep it on `helm uninstall` and Argo CD prune/delete, so a reinstall
+    # doesn't re-download models.
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Delete=false
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.ollama.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "llm-gateway.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "llm-gateway.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "llm-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # Recreate: the ReadWriteOnce volume can't be mounted by old and new pod at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "llm-gateway.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ollama
+  template:
+    metadata:
+      labels:
+        {{- include "llm-gateway.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ollama
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "llm-gateway.podSecurityContext" (dict "uid" 10001) | nindent 8 }}
+      containers:
+        - name: ollama
+          image: {{ .Values.ollama.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 11434
+          env:
+            # Runs as non-root: models on the PVC, Ollama's key/home dir in an emptyDir.
+            - name: OLLAMA_MODELS
+              value: /models
+            - name: HOME
+              value: /tmp
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.ollama.resources | nindent 12 }}
+          securityContext:
+            {{- include "llm-gateway.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ $name }}-models
+        - name: tmp
+          emptyDir: {}
+---
+# Pull the model after everything is synced and healthy; skips the download if present.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-pull-{{ .Release.Revision }}
+  labels:
+    {{- include "llm-gateway.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "llm-gateway.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ollama-pull
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "llm-gateway.podSecurityContext" (dict "uid" 10001) | nindent 8 }}
+      containers:
+        - name: pull
+          image: {{ .Values.ollama.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OLLAMA_HOST
+              value: {{ $name }}:11434
+            - name: MODEL
+              value: {{ .Values.ollama.model | quote }}
+            - name: HOME
+              value: /tmp
+          command: ["/bin/sh", "-c", "ollama show \"$MODEL\" >/dev/null 2>&1 || ollama pull \"$MODEL\""]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            {{- include "llm-gateway.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,51 @@
+# Database migrations (alembic upgrade head) as a one-shot Job, never in the app's startup,
+# so N replicas don't race to migrate.
+# Argo CD: a Sync hook in wave 0 runs after Postgres (wave -1) is healthy and before the
+# gateway (wave 1) rolls out; BeforeHookCreation replaces the previous run on the next sync.
+# Plain `helm install`: an ordinary Job that retries until Postgres accepts connections; the
+# revision suffix gives every `helm upgrade` a new Job (Job specs are immutable).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "llm-gateway.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "llm-gateway.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "llm-gateway.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "llm-gateway.podSecurityContext" (dict "uid" 10001) | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Retry for ~5 minutes inside one attempt so a slow Postgres start doesn't burn
+          # through the Job's backoffLimit.
+          command:
+            - /bin/sh
+            - -c
+            - for i in $(seq 1 60); do alembic upgrade head && exit 0; sleep 5; done; exit 1
+          env:
+            {{- include "llm-gateway.env" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext:
+            {{- include "llm-gateway.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

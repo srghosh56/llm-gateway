@@ -1,0 +1,90 @@
+# Gateway pods. Note: rate limits are enforced per pod (in-memory token bucket), so with
+# 2 replicas a tenant can get up to 2x its configured rate. See README "What I'd change".
+replicaCount: 2
+
+image:
+  # Local image loaded into kind with `make kind-load`. In production: a registry path + digest.
+  repository: llm-gateway
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+gateway:
+  # Empty = the in-chart Ollama service. Set e.g. "http://host.docker.internal:11434/v1" to use
+  # an Ollama running on the Docker Desktop host instead (then set ollama.enabled=false).
+  ollamaBaseUrl: ""
+  # Plain (non-secret) settings, rendered as environment variables.
+  config:
+    GATEWAY_LOG_LEVEL: INFO
+    GATEWAY_METRICS_MAX_TENANTS: "100"
+    # Optional: admin SSO and tracing (see README). Off by default in the cluster.
+    # GATEWAY_OIDC_ISSUER: https://keycloak.example.com/realms/llm-gateway
+    # GATEWAY_OTEL_ENABLED: "true"
+    # GATEWAY_OTEL_ENDPOINT: http://otel-collector.monitoring:4318
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+service:
+  port: 80
+
+secrets:
+  # Recommended outside a laptop: create the Secret yourself (or with External Secrets /
+  # Sealed Secrets) and reference it here; then nothing secret lives in Git.
+  # Keys: GATEWAY_ADMIN_API_KEY, GATEWAY_DATABASE_URL, POSTGRES_PASSWORD.
+  existingSecret: ""
+  # Demo-only values used when existingSecret is empty. Local kind cluster only.
+  adminApiKey: change-me-admin-key
+  postgresPassword: change-me-db-password
+
+postgres:
+  # Single-replica Postgres for the demo. In production use a managed or operator-run
+  # database and set secrets.existingSecret with its URL.
+  enabled: true
+  image: postgres:16.10-alpine
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+ollama:
+  enabled: true
+  image: ollama/ollama:0.12.6
+  # Pulled once into the PVC by a post-sync Job (skipped if already present).
+  model: qwen2.5:0.5b
+  storage: 2Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+prometheusRule:
+  enabled: true
+  # Alert when more than 5% of chat requests fail upstream for 5 minutes.
+  upstreamErrorRatio: 0.05
+  # Alert when p95 time-to-first-token exceeds this many seconds for 10 minutes.
+  ttftP95Seconds: 10
+  runbookUrl: "https://github.com/srghosh56/llm-gateway#observability"
+
+grafanaDashboard:
+  enabled: true
+
+fullnameOverride: ""

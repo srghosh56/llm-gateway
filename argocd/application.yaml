@@ -1,0 +1,26 @@
+# Argo CD watches this Git repo and keeps the cluster matching charts/llm-gateway.
+# Same layout as github.com/srghosh56/gitops-microservice-demo: apply this to the "gitops-demo"
+# kind cluster (Argo CD + kube-prometheus-stack installed by that repo's Terraform).
+#
+# Sync order inside one sync: Postgres (wave -1) -> migration Job hook (wave 0)
+# -> gateway Deployment (wave 1) -> model pull Job (PostSync hook).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: llm-gateway
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/srghosh56/llm-gateway.git
+    targetRevision: main
+    path: charts/llm-gateway
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: llm-gateway
+  syncPolicy:
+    automated:
+      prune: true      # delete resources that were removed from Git
+      selfHeal: true   # undo manual changes made with kubectl
+    syncOptions:
+      - CreateNamespace=true
