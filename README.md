@@ -124,6 +124,7 @@ make bootstrap-k8s              # deploy qwen-small + demo tenant via the admin 
 How the sync is ordered (Argo CD sync waves and hooks):
 
 ```
+wave -2  Secret                             (read by Postgres, migrations, gateway)
 wave -1  Postgres StatefulSet + Service      (must be healthy before migrating)
 wave  0  migrate Job (Sync hook)             alembic upgrade head, once per sync
 wave  1  gateway Deployment                  readiness = database reachable
