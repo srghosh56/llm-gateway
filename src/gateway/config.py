@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://gateway:gateway@localhost:5432/gateway"
     # Static admin key for /admin routes. Unset = admin API disabled. Never commit a real one.
     admin_api_key: str | None = None
+    # OIDC for admins (e.g. Keycloak). Unset issuer = OIDC off. The issuer must match the
+    # token's "iss" exactly; the JWKS URL is optional (default: OIDC discovery).
+    oidc_issuer: str | None = None
+    oidc_audience: str = "llm-gateway"
+    oidc_jwks_url: str | None = None
 
     # Base URL of Ollama's OpenAI-compatible API (it lives under /v1).
     ollama_base_url: str = "http://localhost:11434/v1"
