@@ -255,7 +255,7 @@ the authorization-code + PKCE or device flow, which produce the same kind of tok
 
 ## Tests
 
-96 pytest tests, 98% line coverage, run against a real PostgreSQL with the Alembic migrations
+96 pytest tests, 97% line coverage, run against a real PostgreSQL with the Alembic migrations
 applied (no Ollama needed: tests use the `MockBackend`).
 
 | Area | What is asserted |
@@ -277,7 +277,8 @@ applied (no Ollama needed: tests use the `MockBackend`).
 from 20 concurrent users. In CI it runs for 30 s against the real gateway + Postgres with the
 MockBackend, so it measures the gateway's own overhead (auth, rate limit, quota, registry
 lookup, accounting, SSE) and fails the build if more than 1% of requests fail or p95 latency
-exceeds 500 ms. A local run on a laptop: 690 requests, 0 failures, p95 35 ms, ~60 req/s.
+exceeds 500 ms. A CI run on a GitHub-hosted runner: 1,894 requests, 0 failures, p95 9 ms,
+~64 req/s.
 
 ```bash
 GATEWAY_ADMIN_API_KEY=... make loadtest          # against a running gateway (compose)
