@@ -8,8 +8,9 @@ Tenant API keys
 
 Admins
     ``AdminAuthenticator`` is a small protocol that turns a bearer token into a ``Principal``.
-    Today it is a static admin key; an OIDC/JWT implementation can be dropped in later without
-    touching the endpoints, which only check ``Principal.roles``.
+    Two implementations are chained (see main.py): a static admin key (break-glass and
+    automation) and OIDC/JWT via Keycloak (oidc.py). Endpoints only check ``Principal.roles``,
+    so adding another identity provider doesn't touch them.
 """
 
 import hashlib
